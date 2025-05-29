@@ -1,0 +1,7 @@
+**/__pycache__
+model_checkpoints
+**/*.bin
+**/*.log
+**/output*
+**/eval_results*
+**/wandb
