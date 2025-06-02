@@ -249,7 +249,7 @@ class ActionGPT_Trainer:
             gripper_action_loss_func = F.smooth_l1_loss
             
         loss['action_gripper'] = masked_loss(pred['gripper_action_preds'], batch['actions'][..., -1:].float(), batch['mask'], 0, gripper_action_loss_func) if pred['gripper_action_preds'] is not None else torch.tensor(0.0).to(device)
-        total_loss = 100 * loss['action_arm'] + loss['action_gripper']
+        total_loss = loss['action_arm'] + 0.1 * loss['action_gripper']
         loss['total_loss'] = total_loss
         
         return loss
