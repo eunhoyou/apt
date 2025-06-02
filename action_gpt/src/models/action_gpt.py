@@ -110,49 +110,43 @@ class ActionGPT(nn.Module):
         - Action queries: can see language + prev_actions + ALL other action queries (bidirectional)
         """
         total_length = n_lang_tokens + n_prev_action_tokens + n_action_query_tokens
-        mask = torch.zeros((batch_size, 1, total_length, total_length), device=device)
-        
+        # GPT-2에 맞는 3D mask 생성
+        mask = torch.zeros((batch_size, total_length, total_length), device=device)
+
         # 1. Language tokens: bidirectional among themselves only
-        mask[:, :, :n_lang_tokens, :n_lang_tokens] = 1
+        mask[:, :n_lang_tokens, :n_lang_tokens] = 1
         
         # 2. Previous actions: can see language + ALL previous actions (bidirectional)
         prev_start = n_lang_tokens
         prev_end = n_lang_tokens + n_prev_action_tokens
         
         # Previous actions can see language tokens
-        mask[:, :, prev_start:prev_end, :n_lang_tokens] = 1
+        mask[:, prev_start:prev_end, :n_lang_tokens] = 1
         # Previous actions can see ALL other previous actions (bidirectional)
-        mask[:, :, prev_start:prev_end, prev_start:prev_end] = 1
+        mask[:, prev_start:prev_end, prev_start:prev_end] = 1
         
         # 3. Action queries: can see language + prev_actions + ALL action queries (bidirectional)
         action_start = prev_end
         # Action queries can see all inputs (language + prev_actions)
-        mask[:, :, action_start:, :prev_end] = 1
+        mask[:, action_start:, :prev_end] = 1
         # Action queries can see each other bidirectionally
-        mask[:, :, action_start:, action_start:] = 1
+        mask[:, action_start:, action_start:] = 1
         
-        # 4. Apply prev_actions_mask
+        # 4. Apply prev_actions_mask (무효한 previous action tokens 격리)
         if prev_actions_mask is not None:
-            # Row-wise masking: invalid tokens는 아무것도 attend하지 못함
-            prev_mask_row = prev_actions_mask.view(batch_size, 1, n_prev_action_tokens, 1)
-            # Column-wise masking: invalid tokens는 attend되지 못함  
-            prev_mask_col = prev_actions_mask.view(batch_size, 1, 1, n_prev_action_tokens)
-            
-            # Previous actions 영역에 masking 적용
-            prev_action_col_start = n_lang_tokens
-            prev_action_col_end = n_lang_tokens + n_prev_action_tokens
-            
-            # Previous actions -> Language (row masking만)
-            mask[:, :, prev_action_col_start:prev_action_col_end, :n_lang_tokens] = \
-                mask[:, :, prev_action_col_start:prev_action_col_end, :n_lang_tokens] * prev_mask_row
-                
-            # Previous actions -> Previous actions (row & column masking)
-            mask[:, :, prev_action_col_start:prev_action_col_end, prev_action_col_start:prev_action_col_end] = \
-                mask[:, :, prev_action_col_start:prev_action_col_end, prev_action_col_start:prev_action_col_end] * prev_mask_row * prev_mask_col
-            
-            # Action queries -> Previous actions (column masking만)
-            mask[:, :, action_start:, prev_action_col_start:prev_action_col_end] = \
-                mask[:, :, action_start:, prev_action_col_start:prev_action_col_end] * prev_mask_col
+            for b in range(batch_size):
+                for i in range(n_prev_action_tokens):
+                    if prev_actions_mask[b, i] == 0:  # 무효한 토큰
+                        token_idx = n_lang_tokens + i
+                        
+                        # Row masking: 이 토큰이 다른 토큰들을 attend하지 못함
+                        mask[b, token_idx, :] = 0
+                        
+                        # Column masking: 다른 토큰들이 이 토큰을 attend하지 못함  
+                        mask[b, :, token_idx] = 0
+        
+        # 4D로 확장 (GPT-2 호환성을 위해)
+        mask = mask.unsqueeze(1)  # (batch_size, 1, total_length, total_length)
         
         return mask
 
@@ -222,11 +216,15 @@ class ActionGPT(nn.Module):
             device=rgb.device
         )
         
-        # Apply language attention mask if provided
+        # Apply language attention mask if provided (prev_actions_mask 적용 후에)
         if lang_attention_mask is not None:
-            # Apply language-specific masking
-            lang_mask = lang_attention_mask.view(batch_size, 1, 1, -1)  # (b, 1, 1, n_lang_tokens)
-            full_attention_mask[:, :, :, :n_lang_tokens] = full_attention_mask[:, :, :, :n_lang_tokens] * lang_mask
+            # Column masking: invalid language tokens를 attend하지 못하게
+            lang_mask_col = lang_attention_mask.view(batch_size, 1, 1, -1)  # (b, 1, 1, n_lang_tokens)
+            full_attention_mask[:, :, :, :n_lang_tokens] = full_attention_mask[:, :, :, :n_lang_tokens] * lang_mask_col
+            
+            # Row masking: invalid language tokens가 다른 것들을 attend하지 못하게  
+            lang_mask_row = lang_attention_mask.view(batch_size, 1, -1, 1)  # (b, 1, n_lang_tokens, 1)
+            full_attention_mask[:, :, :n_lang_tokens, :] = full_attention_mask[:, :, :n_lang_tokens, :] * lang_mask_row
         
         attention_mask_for_gpt = torch.where(
             full_attention_mask.bool(),
