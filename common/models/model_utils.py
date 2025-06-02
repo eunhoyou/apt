@@ -32,7 +32,6 @@ def load_action_gpt_policy(args):
     variant = {
         'test_chunk_size': args.test_chunk_size,
         'is_gripper_binary': args.is_gripper_binary,
-        'use_temporal_ensemble': args.use_temporal_ensemble,
         'act_dim': action_gpt_config['act_dim'],
         'seq_len': action_gpt_config['sequence_length'],
         'chunk_size': action_gpt_config['chunk_size'],

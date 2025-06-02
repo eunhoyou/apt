@@ -1,5 +1,4 @@
-
-
+# action_gpt_policy_wrapper.py
 import torch
 import torchvision.transforms as T
 import numpy as np
@@ -35,6 +34,9 @@ class ActionGPT_PolicyWrapper:
         self.chunk_size = variant['chunk_size']
         self.prev_action_buffer_size = variant['prev_action_buffer_size']
         
+        self.valid_prev_actions_count = 0
+        self.rollout_step_counter = 0
+        
     @property
     def device(self):
         return self.policy.device
@@ -52,32 +54,32 @@ class ActionGPT_PolicyWrapper:
 
     def step(self, obs, goal):
         """Step function."""
-        # Language
+        # Language processing
         lang_inputs = self.lang_tokenizer(goal, return_tensors='pt', padding=True)
         tokenized_text = lang_inputs.input_ids
         lang_attention_mask = lang_inputs.attention_mask
 
-        # RGB
+        # RGB processing
         rgb = self.rgb_process(obs['rgb_obs']['rgb_static'])
-        # print(f"RGB after processing: {rgb.shape}")
-        rgb_data = rgb.unsqueeze(0)
-
-        # # Attention mask
-        attention_mask = torch.ones(1, self.seq_len).long()
+        rgb = rgb.unsqueeze(0).unsqueeze(0)  # (1, 1, c, h, w)
+        
+        # prev_actions_mask
+        prev_actions_mask = torch.zeros(1, self.prev_action_buffer_size)
+        if self.valid_prev_actions_count > 0:
+            start_idx = self.prev_action_buffer_size - self.valid_prev_actions_count
+            prev_actions_mask[0, start_idx:] = 1.0
         
         # Forward pass
         tokenized_text = tokenized_text.to(self.device)
-        lang_attention_mask = lang_attention_mask.to(self.device) if lang_attention_mask is not None else None
-        rgb_data = rgb_data.to(self.device)
-        attention_mask = attention_mask.to(self.device)
+        lang_attention_mask = lang_attention_mask.to(self.device)  if lang_attention_mask is not None else None
         rgb = rgb.to(self.device)
         prev_actions = self.prev_action_buffer.to(self.device)
-
+        prev_actions_mask = prev_actions_mask.to(self.device)
+        
         with torch.no_grad():
             prediction = self.policy(
-                rgb=rgb_data, 
+                rgb=rgb, 
                 language=tokenized_text,
-                attention_mask=attention_mask,
                 prev_actions=prev_actions,
                 lang_attention_mask=lang_attention_mask,
         )
@@ -104,14 +106,22 @@ class ActionGPT_PolicyWrapper:
             arm_action_pred = arm_action_pred.softmax(dim=-1).argmax(dim=-1)
             
         action_pred = torch.cat((arm_action_pred, gripper_action_pred), dim=-1)  # (test_chunk_size, act_dim)
-        action_pred = action_pred.detach().cpu()
-
-        excuted_action = action_pred
-        # Update prev action buffer
-        self.prev_action_buffer = torch.cat([
-            self.prev_action_buffer[:, 1:],  # (1, 9, action_dim)
-            excuted_action.unsqueeze(0)  # (1, 1, actiom_dim)
-        ], dim=1)  # (1, 10, ction_dim)
+        executed_actions = action_pred.detach().cpu()
         
+        # Update prev action buffer
+        num_executed = min(self.test_chunk_size, self.prev_action_buffer_size)
+        if num_executed >= self.prev_action_buffer_size:  
+            self.prev_action_buffer = executed_actions[-self.prev_action_buffer_size:].unsqueeze(0)
+            self.valid_prev_actions_count = self.prev_action_buffer_size
+        else:
+            self.prev_action_buffer = torch.cat([
+                self.prev_action_buffer[:, num_executed:],
+                executed_actions.unsqueeze(0)
+            ], dim=1)
+            self.valid_prev_actions_count = min(
+                self.valid_prev_actions_count + num_executed, 
+                self.prev_action_buffer_size
+            )
+            
         self.rollout_step_counter += 1
-        return action_pred  # (1, action_dim)
+        return executed_actions

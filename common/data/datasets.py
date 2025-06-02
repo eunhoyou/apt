@@ -75,33 +75,13 @@ class DataPrefetcher():
         return batch
 
 
-class LMDBDataset_Mix(Dataset):
-    def __init__(self, datasets, sample_weights):
-        super().__init__()
-        self.datasets = datasets
-        self.sample_weights = np.array(sample_weights)
-        self.num_datasets = len(datasets)
-        self.dataset_sizes = []
-        for dataset in self.datasets:
-            self.dataset_sizes.append(len(dataset))
-
-    def __getitem__(self, idx):
-        dataset_index = np.random.choice(self.num_datasets, p=self.sample_weights / self.sample_weights.sum())
-        idx = np.random.randint(self.dataset_sizes[dataset_index])
-        return self.datasets[dataset_index][idx]
-
-    def __len__(self):
-        return sum(self.dataset_sizes)
-
-
 class LMDBDataset_for_ActionGPT(Dataset):
     def __init__(
-        self, lmdb_dir, split, skip_frame, 
-        sequence_length=1,
-        chunk_size=5,
-        prev_action_buffer_size=10,
+        self, lmdb_dir, split,
+        sequence_length,
+        chunk_size,
+        prev_action_buffer_size,
         action_dim=7,
-        # do_extract_action=True,
         video_dir=None, rgb_shape=(224, 224), rgb_preprocessor=None, max_skip_frame=None):
 
         super().__init__()
@@ -110,9 +90,6 @@ class LMDBDataset_for_ActionGPT(Dataset):
         self.chunk_size = chunk_size
         self.prev_action_buffer_size = prev_action_buffer_size
         self.action_dim = action_dim
-        self.skip_frame = skip_frame
-        self.max_skip_frame = max_skip_frame
-        # self.do_extract_action = do_extract_action
 
         self.dummy_rgb_initial = torch.zeros(1, 3, rgb_shape[0], rgb_shape[1], dtype=torch.uint8)
         self.dummy_actions = torch.zeros(sequence_length, chunk_size, action_dim)
@@ -129,7 +106,7 @@ class LMDBDataset_for_ActionGPT(Dataset):
         with env.begin() as txn:
             dataset_len = loads(txn.get('cur_step'.encode())) + 1
             self.start_step = int(dataset_len * start_ratio) 
-            self.end_step = int(dataset_len * end_ratio) - sequence_length * skip_frame - chunk_size
+            self.end_step = int(dataset_len * end_ratio) - sequence_length - chunk_size
         env.close()
 
     def open_lmdb(self):
@@ -145,7 +122,7 @@ class LMDBDataset_for_ActionGPT(Dataset):
         # return os.path.join(self.video_dir, f'{self.split}_eps_{cur_episode:08d}.mp4')
         raise NotImplementedError
 
-    def extract_frames(self, idx, cur_episode, delta_t, rgb_initial):
+    def extract_frames(self, idx, cur_episode, rgb_initial):
         start_local_step = loads(self.txn.get(f'local_step_{idx}'.encode()))
         video_path = self.get_video_path(cur_episode)
         video = cv2.VideoCapture(video_path)
@@ -169,10 +146,10 @@ class LMDBDataset_for_ActionGPT(Dataset):
 
         video.release()
 
-    def extract_actions(self, idx, cur_episode, delta_t, actions, mask):
+    def extract_actions(self, idx, cur_episode, actions, mask):
         for i in range(self.sequence_length):
             for j in range(self.chunk_size):
-                cur_idx = idx + i*delta_t + j
+                cur_idx = idx + j
                 if loads(self.txn.get(f'cur_episode_{cur_idx}'.encode())) == cur_episode:
                     mask[i, j] = 1
                     action = self.extract_action(cur_idx)
@@ -184,88 +161,53 @@ class LMDBDataset_for_ActionGPT(Dataset):
     def __getitem__(self, idx):
         if hasattr(self, 'env') == 0:
             self.open_lmdb()
-        
-        # max_retries = 5
-        # retry_count = 0
-        # while retry_count < max_retries:
-        while True:
-            try:
-                orig_idx = idx
-                idx = idx + self.start_step
-                cur_episode = loads(self.txn.get(f'cur_episode_{idx}'.encode()))
-
-                if self.max_skip_frame is None:
-                    delta_t = self.skip_frame
-                else:
-                    delta_t = random.randint(self.skip_frame, self.max_skip_frame)
-
-                rgb_initial = self.dummy_rgb_initial.clone()
-                actions = self.dummy_actions.clone()
-                mask = self.dummy_mask.clone()
-                prev_actions = self.dummy_prev_actions.clone()
-                
-                # previous actions 
-                for i in range(1, self.prev_action_buffer_size + 1):
-                    prev_idx = idx - i
-                    if prev_idx >= self.start_step and loads(self.txn.get(f'cur_episode_{prev_idx}'.encode())) == cur_episode:
-                        prev_actions[self.prev_action_buffer_size - i] = self.extract_action(prev_idx)
-
-                # extract lang goal
-                lang = self.extract_lang_goal(idx, cur_episode)
-
-                # extract initial frame
-                self.extract_frames(
-                    idx=idx, cur_episode=cur_episode, delta_t=delta_t,
-                    rgb_initial=rgb_initial
-                )
-
-                self.extract_actions(
-                    idx=idx, cur_episode=cur_episode, delta_t=delta_t,
-                    actions=actions, 
-                    mask=mask
-                )
-
-                return {
-                    "lang": lang,
-                    "rgb_initial": rgb_initial,
-                    "actions": actions,
-                    "mask": mask,
-                    "prev_actions": prev_actions,
-                    "idx": orig_idx
-                }
             
-            except Exception as e:
-                print(f"Error in __getitem__ (retry {retry_count+1}/{max_retries}): {e}")
-                retry_count += 1
-                idx = random.randint(0, len(self) - 1)
+        orig_idx = idx
+        idx = idx + self.start_step
+        cur_episode = loads(self.txn.get(f'cur_episode_{idx}'.encode()))
+
+        rgb_initial = self.dummy_rgb_initial.clone()
+        actions = self.dummy_actions.clone()
+        mask = self.dummy_mask.clone()
+        prev_actions = self.dummy_prev_actions.clone()
+        prev_actions_mask = torch.zeros(self.prev_action_buffer_size)
+        
+        # previous actions 
+        for i in range(1, self.prev_action_buffer_size + 1):
+            prev_idx = idx - i
+            if prev_idx >= self.start_step and loads(self.txn.get(f'cur_episode_{prev_idx}'.encode())) == cur_episode:
+                prev_actions[self.prev_action_buffer_size - i] = self.extract_action(prev_idx)
+                prev_actions_mask[self.prev_action_buffer_size - i] = 1.0
+
+        # extract lang goal
+        lang = self.extract_lang_goal(idx, cur_episode)
+
+        # extract initial frame
+        self.extract_frames(
+            idx=idx, 
+            cur_episode=cur_episode, 
+            rgb_initial=rgb_initial
+        )
+
+        self.extract_actions(
+            idx=idx, 
+            cur_episode=cur_episode,
+            actions=actions, 
+            mask=mask
+        )
+
+        return {
+            "lang": lang,
+            "rgb_initial": rgb_initial,
+            "actions": actions,
+            "mask": mask,
+            "prev_actions": prev_actions,
+            "prev_actions_mask": prev_actions_mask,
+            "idx": orig_idx
+        }
 
     def __len__(self):
         return self.end_step - self.start_step
-
-
-class LMDBDataset_for_ActionGPT_OXE(LMDBDataset_for_ActionGPT):
-    def get_video_path(self, cur_episode):
-        return os.path.join(self.video_dir, f'{self.split}_eps_{cur_episode:08d}.mp4')
-
-
-class LMDBDataset_for_ActionGPT_RT1(LMDBDataset_for_ActionGPT_OXE):
-    def __init__(self, world_vector_range=(-1.0, 1.0), *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.world_vector_range = world_vector_range
-
-    def extract_action(self, idx):
-        feature_dict = loads(self.txn.get(f'feature_dict_{idx}'.encode()))
-        action = []
-        for act_name, act_min, act_max in [
-            ('world_vector', self.world_vector_range[0], self.world_vector_range[1]),
-            ('rotation_delta', -np.pi / 2, np.pi / 2),
-            ('gripper_closedness_action', -1.0, 1.0)
-        ]:
-            action.append(np.clip(feature_dict['action'][act_name], act_min, act_max))
-        action = np.concatenate(action)
-        action = torch.from_numpy(action)
-        return action
-
 
 class LMDBDataset_for_ActionGPT_CALVIN(LMDBDataset_for_ActionGPT):
     def __init__(self, *args, **kwargs):
@@ -275,13 +217,13 @@ class LMDBDataset_for_ActionGPT_CALVIN(LMDBDataset_for_ActionGPT):
         lang = loads(self.txn.get(f'inst_{cur_episode}'.encode()))
         return lang
 
-    def extract_frames(self, idx, cur_episode, delta_t, rgb_initial):
+    def extract_frames(self, idx, cur_episode, rgb_initial):
         rgb_initial[0] = decode_jpeg(loads(self.txn.get(f'rgb_static_{idx}'.encode())))
 
-    def extract_actions(self, idx, cur_episode, delta_t, actions, mask):
+    def extract_actions(self, idx, cur_episode, actions, mask):
         for i in range(self.sequence_length):
             for j in range(self.chunk_size):
-                cur_idx = idx + i*delta_t + j
+                cur_idx = idx + j
                 if loads(self.txn.get(f'cur_episode_{cur_idx}'.encode())) == cur_episode:
                     mask[i, j] = 1
                     action = self.extract_action(cur_idx)

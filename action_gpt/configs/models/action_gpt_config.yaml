@@ -20,8 +20,8 @@ model_causal_transformer:
 act_dim: 7
 hidden_size: 768
 sequence_length: 1
-chunk_size: 5
-prev_action_buffer_size: 10
+chunk_size: 6
+prev_action_buffer_size: 30
 img_feat_dim: 768
 patch_feat_dim: 768
 lang_feat_dim: 768
