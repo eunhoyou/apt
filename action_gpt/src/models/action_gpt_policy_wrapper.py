@@ -82,6 +82,7 @@ class ActionGPT_PolicyWrapper:
                 language=tokenized_text,
                 prev_actions=prev_actions,
                 lang_attention_mask=lang_attention_mask,
+                prev_actions_mask=prev_actions_mask,
         )
 
         # Arm action
