@@ -115,9 +115,14 @@ class ActionGPT(nn.Module):
         # 1. Language tokens: bidirectional among themselves only
         mask[:, :, :n_lang_tokens, :n_lang_tokens] = 1
         
-        # 2. Previous actions: can see language + themselves  
+        # 2. Previous actions: can see language + ALL previous actions (bidirectional)
+        prev_start = n_lang_tokens
         prev_end = n_lang_tokens + n_prev_action_tokens
-        mask[:, :, n_lang_tokens:prev_end, :prev_end] = 1
+        
+        # Previous actions can see language tokens
+        mask[:, :, prev_start:prev_end, :n_lang_tokens] = 1
+        # Previous actions can see ALL other previous actions (bidirectional)
+        mask[:, :, prev_start:prev_end, prev_start:prev_end] = 1
         
         # 3. Action queries: can see language + prev_actions + ALL action queries (bidirectional)
         action_start = prev_end
@@ -127,27 +132,33 @@ class ActionGPT(nn.Module):
         mask[:, :, action_start:, action_start:] = 1
         
         # 4. Apply prev_actions_mask
-        prev_mask_expanded = prev_actions_mask.view(batch_size, 1, 1, n_prev_action_tokens)
-        
-        # Apply mask to previous action columns (where they can be attended to)
-        prev_action_col_start = n_lang_tokens
-        prev_action_col_end = n_lang_tokens + n_prev_action_tokens
-        
-        # Mask previous action tokens from being attended to by:
-        # - Other previous action tokens
-        mask[:, :, n_lang_tokens:prev_action_col_end, prev_action_col_start:prev_action_col_end] = \
-            mask[:, :, n_lang_tokens:prev_action_col_end, prev_action_col_start:prev_action_col_end] * prev_mask_expanded
-        
-        # - Action query tokens  
-        mask[:, :, action_start:, prev_action_col_start:prev_action_col_end] = \
-            mask[:, :, action_start:, prev_action_col_start:prev_action_col_end] * prev_mask_expanded
+        if prev_actions_mask is not None:
+            # Row-wise masking: invalid tokens는 아무것도 attend하지 못함
+            prev_mask_row = prev_actions_mask.view(batch_size, 1, n_prev_action_tokens, 1)
+            # Column-wise masking: invalid tokens는 attend되지 못함  
+            prev_mask_col = prev_actions_mask.view(batch_size, 1, 1, n_prev_action_tokens)
+            
+            # Previous actions 영역에 masking 적용
+            prev_action_col_start = n_lang_tokens
+            prev_action_col_end = n_lang_tokens + n_prev_action_tokens
+            
+            # Previous actions -> Language (row masking만)
+            mask[:, :, prev_action_col_start:prev_action_col_end, :n_lang_tokens] = \
+                mask[:, :, prev_action_col_start:prev_action_col_end, :n_lang_tokens] * prev_mask_row
+                
+            # Previous actions -> Previous actions (row & column masking)
+            mask[:, :, prev_action_col_start:prev_action_col_end, prev_action_col_start:prev_action_col_end] = \
+                mask[:, :, prev_action_col_start:prev_action_col_end, prev_action_col_start:prev_action_col_end] * prev_mask_row * prev_mask_col
+            
+            # Action queries -> Previous actions (column masking만)
+            mask[:, :, action_start:, prev_action_col_start:prev_action_col_end] = \
+                mask[:, :, action_start:, prev_action_col_start:prev_action_col_end] * prev_mask_col
         
         return mask
 
     def forward(self, 
                 rgb,                        # (b, 1, c, h, w)
                 language,                   # Tokenized language input
-                attention_mask,             # (b, t)
                 prev_actions=None,          # (b, prev_action_buffer_size, act_dim)
                 lang_attention_mask=None,
                 prev_actions_mask=None,     # (b, prev_action_buffer_size)

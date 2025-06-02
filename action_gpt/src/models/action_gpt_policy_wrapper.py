@@ -71,7 +71,7 @@ class ActionGPT_PolicyWrapper:
         
         # Forward pass
         tokenized_text = tokenized_text.to(self.device)
-        lang_attention_mask = lang_attention_mask.to(self.device)  if lang_attention_mask is not None else None
+        lang_attention_mask = lang_attention_mask.to(self.device) if lang_attention_mask is not None else None
         rgb = rgb.to(self.device)
         prev_actions = self.prev_action_buffer.to(self.device)
         prev_actions_mask = prev_actions_mask.to(self.device)
