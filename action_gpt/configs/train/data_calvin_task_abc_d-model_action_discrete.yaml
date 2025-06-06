@@ -20,4 +20,4 @@ training_config:
   save_steps: 10000
   save_path: "/workspace/ActionGPT/action_gpt/outputs/calvin_task_abc_d"
   resume_ckpt_path: null
-  max_epoch: 10
+  max_epoch: 20

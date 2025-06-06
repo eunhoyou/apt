@@ -102,16 +102,22 @@ class ActionGPT(nn.Module):
                       not any(module_name in k for module_name in modules_to_exclude)}
         return state_dict
 
+<<<<<<< HEAD
     def create_strict_causal_with_bidirectional_action_mask(self, batch_size, n_lang_tokens, n_prev_action_tokens, n_action_query_tokens, device):
         """
         Create strict causal mask with bidirectional action query attention
         
+=======
+    def create_attention_mask(self, batch_size, n_lang_tokens, n_prev_action_tokens, n_action_query_tokens, prev_actions_mask, device):
+        """
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
         Mask pattern:
         - Language tokens: bidirectional among themselves, cannot see future (prev_actions, action_queries)
         - Previous actions: can see language + themselves, cannot see future (action_queries)  
         - Action queries: can see language + prev_actions + ALL other action queries (bidirectional)
         """
         total_length = n_lang_tokens + n_prev_action_tokens + n_action_query_tokens
+<<<<<<< HEAD
         mask = torch.zeros((batch_size, 1, total_length, total_length), device=device)
         
         # 1. Language tokens: bidirectional among themselves only
@@ -120,21 +126,66 @@ class ActionGPT(nn.Module):
         # 2. Previous actions: can see language + themselves  
         prev_end = n_lang_tokens + n_prev_action_tokens
         mask[:, :, n_lang_tokens:prev_end, :prev_end] = 1
+=======
+        # GPT-2에 맞는 3D mask 생성
+        mask = torch.zeros((batch_size, total_length, total_length), device=device)
+
+        # 1. Language tokens: bidirectional among themselves only
+        mask[:, :n_lang_tokens, :n_lang_tokens] = 1
+        
+        # 2. Previous actions: can see language + ALL previous actions (bidirectional)
+        prev_start = n_lang_tokens
+        prev_end = n_lang_tokens + n_prev_action_tokens
+        
+        # Previous actions can see language tokens
+        mask[:, prev_start:prev_end, :n_lang_tokens] = 1
+        # Previous actions can see ALL other previous actions (bidirectional)
+        mask[:, prev_start:prev_end, prev_start:prev_end] = 1
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
         
         # 3. Action queries: can see language + prev_actions + ALL action queries (bidirectional)
         action_start = prev_end
         # Action queries can see all inputs (language + prev_actions)
+<<<<<<< HEAD
         mask[:, :, action_start:, :prev_end] = 1
         # Action queries can see each other bidirectionally
         mask[:, :, action_start:, action_start:] = 1
+=======
+        mask[:, action_start:, :prev_end] = 1
+        # Action queries can see each other bidirectionally
+        mask[:, action_start:, action_start:] = 1
+        
+        # 4. Apply prev_actions_mask (무효한 previous action tokens 격리)
+        if prev_actions_mask is not None:
+            for b in range(batch_size):
+                for i in range(n_prev_action_tokens):
+                    if prev_actions_mask[b, i] == 0:  # 무효한 토큰
+                        token_idx = n_lang_tokens + i
+                        
+                        # Row masking: 이 토큰이 다른 토큰들을 attend하지 못함
+                        mask[b, token_idx, :] = 0
+                        
+                        # Column masking: 다른 토큰들이 이 토큰을 attend하지 못함  
+                        mask[b, :, token_idx] = 0
+        
+        # 4D로 확장 (GPT-2 호환성을 위해)
+        mask = mask.unsqueeze(1)  # (batch_size, 1, total_length, total_length)
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
         
         return mask
 
     def forward(self, 
+<<<<<<< HEAD
                 rgb,                  # (b, 1, c, h, w)
                 language,             # Tokenized language input
                 prev_actions=None,    # (b, prev_action_buffer_size, act_dim)
+=======
+                rgb,                        # (b, 1, c, h, w)
+                language,                   # Tokenized language input
+                prev_actions=None,          # (b, prev_action_buffer_size, act_dim)
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
                 lang_attention_mask=None,
+                prev_actions_mask=None,     # (b, prev_action_buffer_size)
                 **kwargs
     ):
         batch_size, _, c, h, w = rgb.shape
@@ -186,11 +237,16 @@ class ActionGPT(nn.Module):
         
         stacked_inputs = self.embed_ln(stacked_inputs)
         
+<<<<<<< HEAD
         full_attention_mask = self.create_strict_causal_with_bidirectional_action_mask(
+=======
+        full_attention_mask = self.create_attention_mask(
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
             batch_size=batch_size,
             n_lang_tokens=n_lang_tokens,
             n_prev_action_tokens=n_prev_action_tokens, 
             n_action_query_tokens=n_action_query_tokens,
+<<<<<<< HEAD
             device=rgb.device
         )
         
@@ -200,6 +256,22 @@ class ActionGPT(nn.Module):
             lang_mask = lang_attention_mask.view(batch_size, 1, 1, -1)  # (b, 1, 1, n_lang_tokens)
             full_attention_mask[:, :, :, :n_lang_tokens] = full_attention_mask[:, :, :, :n_lang_tokens] * lang_mask
 
+=======
+            prev_actions_mask=prev_actions_mask,
+            device=rgb.device
+        )
+        
+        # Apply language attention mask if provided (prev_actions_mask 적용 후에)
+        if lang_attention_mask is not None:
+            # Column masking: invalid language tokens를 attend하지 못하게
+            lang_mask_col = lang_attention_mask.view(batch_size, 1, 1, -1)  # (b, 1, 1, n_lang_tokens)
+            full_attention_mask[:, :, :, :n_lang_tokens] = full_attention_mask[:, :, :, :n_lang_tokens] * lang_mask_col
+            
+            # Row masking: invalid language tokens가 다른 것들을 attend하지 못하게  
+            lang_mask_row = lang_attention_mask.view(batch_size, 1, -1, 1)  # (b, 1, n_lang_tokens, 1)
+            full_attention_mask[:, :, :n_lang_tokens, :] = full_attention_mask[:, :, :n_lang_tokens, :] * lang_mask_row
+        
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
         attention_mask_for_gpt = torch.where(
             full_attention_mask.bool(),
             torch.zeros_like(full_attention_mask, dtype=torch.float),

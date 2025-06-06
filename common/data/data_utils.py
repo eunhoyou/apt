@@ -8,14 +8,12 @@ pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dot
 from transformers import AutoTokenizer
 from transformers.utils import FEATURE_EXTRACTOR_NAME, get_file_from_repo
 import json
-from common.data.datasets import LMDBDataset_for_ActionGPT_RT1, LMDBDataset_for_ActionGPT_OXE, LMDBDataset_Mix, LMDBDataset_for_ActionGPT_CALVIN
+from common.data.datasets import LMDBDataset_for_ActionGPT_CALVIN
 from common.data.mix_utils import BASE_STEPSIZE, DISPLAY_KEY
 from torchvision.transforms.v2 import Resize, InterpolationMode
 from torch.utils.data import ConcatDataset
 
 data_type2dataset_cls = {
-    'rt1': LMDBDataset_for_ActionGPT_RT1,
-    'oxe': LMDBDataset_for_ActionGPT_OXE,
     'calvin': LMDBDataset_for_ActionGPT_CALVIN,
 }
 
@@ -61,12 +59,8 @@ def load_dataset(data_config, extra_data_config):
             train_sample_weights.append(weight)
             eval_sample_weights.append(weight)
 
-        if data_config['weighted']:
-            train_dataset = LMDBDataset_Mix(datasets=train_datasets, sample_weights=train_sample_weights)
-            eval_dataset = LMDBDataset_Mix(datasets=eval_datasets, sample_weights=eval_sample_weights)
-        else:
-            train_dataset = ConcatDataset(train_datasets)
-            eval_dataset = ConcatDataset(eval_datasets)
+        train_dataset = ConcatDataset(train_datasets)
+        eval_dataset = ConcatDataset(eval_datasets)
             
     else:
         dataset_cls = data_type2dataset_cls[data_type]

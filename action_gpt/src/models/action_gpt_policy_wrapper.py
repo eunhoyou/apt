@@ -34,6 +34,9 @@ class ActionGPT_PolicyWrapper:
         self.chunk_size = variant['chunk_size']
         self.prev_action_buffer_size = variant['prev_action_buffer_size']
         
+        self.valid_prev_actions_count = 0
+        self.rollout_step_counter = 0
+        
     @property
     def device(self):
         return self.policy.device
@@ -62,19 +65,30 @@ class ActionGPT_PolicyWrapper:
         # RGB processing
         rgb = self.rgb_process(obs['rgb_obs']['rgb_static'])
         rgb = rgb.unsqueeze(0).unsqueeze(0)  # (1, 1, c, h, w)
+<<<<<<< HEAD
+=======
+        
+        # prev_actions_mask
+        prev_actions_mask = torch.zeros(1, self.prev_action_buffer_size)
+        if self.valid_prev_actions_count > 0:
+            start_idx = self.prev_action_buffer_size - self.valid_prev_actions_count
+            prev_actions_mask[0, start_idx:] = 1.0
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
         
         # Forward pass
         tokenized_text = tokenized_text.to(self.device)
         lang_attention_mask = lang_attention_mask.to(self.device) if lang_attention_mask is not None else None
         rgb = rgb.to(self.device)
         prev_actions = self.prev_action_buffer.to(self.device)
-
+        prev_actions_mask = prev_actions_mask.to(self.device)
+        
         with torch.no_grad():
             prediction = self.policy(
                 rgb=rgb, 
                 language=tokenized_text,
                 prev_actions=prev_actions,
                 lang_attention_mask=lang_attention_mask,
+                prev_actions_mask=prev_actions_mask,
         )
 
         # Arm action
@@ -94,13 +108,34 @@ class ActionGPT_PolicyWrapper:
             
         action_pred = torch.cat((arm_action_pred, gripper_action_pred), dim=-1)  # (test_chunk_size, act_dim)
         executed_actions = action_pred.detach().cpu()
+<<<<<<< HEAD
         
         # Update prev action buffer
         self.prev_action_buffer = torch.cat([
             self.prev_action_buffer[:, self.test_chunk_size:],
             executed_actions.unsqueeze(0)
         ], dim=1)
+=======
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
         
+        # Update prev action buffer
+        num_executed = min(self.test_chunk_size, self.prev_action_buffer_size)
+        if num_executed >= self.prev_action_buffer_size:  
+            self.prev_action_buffer = executed_actions[-self.prev_action_buffer_size:].unsqueeze(0)
+            self.valid_prev_actions_count = self.prev_action_buffer_size
+        else:
+            self.prev_action_buffer = torch.cat([
+                self.prev_action_buffer[:, num_executed:],
+                executed_actions.unsqueeze(0)
+            ], dim=1)
+            self.valid_prev_actions_count = min(
+                self.valid_prev_actions_count + num_executed, 
+                self.prev_action_buffer_size
+            )
+            
         self.rollout_step_counter += 1
+<<<<<<< HEAD
         print(self.prev_action_buffer.shape)
+=======
+>>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27
         return executed_actions
