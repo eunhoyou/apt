@@ -63,7 +63,7 @@ os.environ["FFMPEG_BINARY"] = "auto-detect"
 CALVIN_ROOT = os.environ['CALVIN_ROOT']
 
 def make_env(dataset_path, observation_space, device, show_gui=False):
-    val_folder = Path(dataset_path) / "validation"
+    val_folder = Path(dataset_path) / "training"
     from calvin_env_wrapper_raw import CalvinEnvWrapperRaw
     env = CalvinEnvWrapperRaw(val_folder, observation_space, device, show_gui)
     return env
@@ -108,6 +108,7 @@ def evaluate_policy(model, env, eval_sr_path, eval_result_path, ep_len, num_sequ
 def evaluate_sequence(env, model, task_checker, initial_state, eval_sequence, val_annotations, debug, eval_dir, sequence_i, ep_len):
     robot_obs, scene_obs = get_env_state_for_initial_condition(initial_state)
     env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
+    model.reset_buffer()  # buffer reset
     success_counter = 0
     if debug:
         time.sleep(1)
@@ -210,7 +211,6 @@ if __name__ == '__main__':
     parser.add_argument('--action_gpt_path', type=str, required=True)
 
     parser.add_argument('--test_chunk_size', type=int, default=5)
-    parser.add_argument('--use_temporal_ensemble', type=json.loads, default='false')
 
     parser.add_argument('--num_sequences', type=int, default=1000)
     parser.add_argument('--ep_len', type=int, default=360)
@@ -222,3 +222,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     set_seed(42)
     main(args)
+
+    

@@ -44,10 +44,7 @@ do
 done
 
 <<COMMENT
-conda activate moto
 pip install tensorflow-datasets
-export PROJECT_ROOT=[your path to Moto project]
-export OUTPUT_ROOT=[your path to save datasets]
 cd ${PROJECT_ROOT}/scripts/
 nohup bash download_and_preprocess_oxe_data.sh > download_and_preprocess_oxe_data.log 2>&1 &
 tail -f download_and_preprocess_oxe_data.log

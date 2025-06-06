@@ -18,7 +18,7 @@ class ActionGPT(nn.Module):
             lang_feat_dim,
             freeze_lang=True,
             freeze_vision=True,
-            pred_discrete_arm_action=False, # predict discrete arm actions for berkeley_fanuc_manipulation
+            pred_discrete_arm_action=False,
             **kwargs
     ):
         super().__init__()
@@ -102,10 +102,37 @@ class ActionGPT(nn.Module):
                       not any(module_name in k for module_name in modules_to_exclude)}
         return state_dict
 
+    def create_strict_causal_with_bidirectional_action_mask(self, batch_size, n_lang_tokens, n_prev_action_tokens, n_action_query_tokens, device):
+        """
+        Create strict causal mask with bidirectional action query attention
+        
+        Mask pattern:
+        - Language tokens: bidirectional among themselves, cannot see future (prev_actions, action_queries)
+        - Previous actions: can see language + themselves, cannot see future (action_queries)  
+        - Action queries: can see language + prev_actions + ALL other action queries (bidirectional)
+        """
+        total_length = n_lang_tokens + n_prev_action_tokens + n_action_query_tokens
+        mask = torch.zeros((batch_size, 1, total_length, total_length), device=device)
+        
+        # 1. Language tokens: bidirectional among themselves only
+        mask[:, :, :n_lang_tokens, :n_lang_tokens] = 1
+        
+        # 2. Previous actions: can see language + themselves  
+        prev_end = n_lang_tokens + n_prev_action_tokens
+        mask[:, :, n_lang_tokens:prev_end, :prev_end] = 1
+        
+        # 3. Action queries: can see language + prev_actions + ALL action queries (bidirectional)
+        action_start = prev_end
+        # Action queries can see all inputs (language + prev_actions)
+        mask[:, :, action_start:, :prev_end] = 1
+        # Action queries can see each other bidirectionally
+        mask[:, :, action_start:, action_start:] = 1
+        
+        return mask
+
     def forward(self, 
                 rgb,                  # (b, 1, c, h, w)
                 language,             # Tokenized language input
-                attention_mask,       # (b, t)
                 prev_actions=None,    # (b, prev_action_buffer_size, act_dim)
                 lang_attention_mask=None,
                 **kwargs
@@ -135,16 +162,10 @@ class ActionGPT(nn.Module):
         patch_embeddings = patch_embeddings + condition_embeddings  # (b, n_patchs, h)
         obs_embeddings = obs_embeddings + condition_embeddings  # (b, 1, h)
         
-        # Note: Image features (patch_embeddings, obs_embeddings) are NOT part of GPT input sequence
-        # They will be used later in cross-attention with action queries
-        # Format sequence: [T5 tokens], [prev actions], [ACT_1], ... , [ACT_t]
-        
-        # Embed previous actions if provided
         if prev_actions is not None:
             prev_action_embeddings = self.embed_prev_action(prev_actions)  # (b, prev_action_buffer_size, h)
             prev_action_embeddings = prev_action_embeddings + condition_embeddings  # Add condition embedding
         else:
-            # If no previous actions, use zero tensor
             prev_action_embeddings = torch.zeros(batch_size, self.prev_action_buffer_size, self.hidden_size, device=rgb.device)
         
         # Generate action query tokens
@@ -165,59 +186,38 @@ class ActionGPT(nn.Module):
         
         stacked_inputs = self.embed_ln(stacked_inputs)
         
-        # Language tokens attention mask
-        lang_attention_mask_tensor = torch.ones((batch_size, 1, n_lang_tokens), dtype=torch.long, device=rgb.device)
-
+        full_attention_mask = self.create_strict_causal_with_bidirectional_action_mask(
+            batch_size=batch_size,
+            n_lang_tokens=n_lang_tokens,
+            n_prev_action_tokens=n_prev_action_tokens, 
+            n_action_query_tokens=n_action_query_tokens,
+            device=rgb.device
+        )
+        
+        # Apply language attention mask if provided
         if lang_attention_mask is not None:
-            lang_attention_mask_tensor = lang_attention_mask.view(batch_size, 1, -1)
-        
-        # Previous actions attention mask
-        prev_action_attention_mask = torch.ones((batch_size, 1, n_prev_action_tokens), dtype=torch.long, device=rgb.device)
-        
-        # Action query tokens attention mask
-        if attention_mask is not None:
-            # attention_mask: (b, sequence_length) - indicates which sequence steps are valid
-            action_query_attention_mask = attention_mask.view(batch_size, self.sequence_length, 1)
-            action_query_attention_mask = action_query_attention_mask.repeat(1, 1, self.chunk_size)  # (b, sequence_length, chunk_size)
-            action_query_attention_mask = action_query_attention_mask.reshape(batch_size, 1, self.sequence_length * self.chunk_size)
-        else:
-            # If no attention mask provided, assume all action queries are valid
-            action_query_attention_mask = torch.ones((batch_size, 1, n_action_query_tokens), dtype=torch.long, device=rgb.device)
-        
-        # Combine all attention masks for sequence
-        combined_attention_mask = torch.cat([
-            lang_attention_mask_tensor,       # (b, 1, n_lang_tokens)
-            prev_action_attention_mask,       # (b, 1, n_prev_action_tokens)  
-            action_query_attention_mask       # (b, 1, n_action_query_tokens)
-        ], dim=2)  # (b, 1, total_sequence_length)
-        
-        total_sequence_length = combined_attention_mask.shape[2]
-        
-        # Create attention mask for transformer
-        # Start with basic bidirectional attention
-        full_attention_mask = combined_attention_mask.unsqueeze(2).expand(-1, -1, total_sequence_length, -1)  # (b, 1, total_seq_len, total_seq_len)
-        
-        # Action queries cannot attend to themselves
-        action_query_start_idx = n_lang_tokens + n_prev_action_tokens
-        action_query_end_idx = action_query_start_idx + n_action_query_tokens
-        
-        # Mask action queries from attending to action queries
-        full_attention_mask[:, :, action_query_start_idx:action_query_end_idx, action_query_start_idx:action_query_end_idx] = 0
-        
-        # Apply row-wise masking
-        row_mask = combined_attention_mask.unsqueeze(3).expand(-1, -1, -1, total_sequence_length)  # (b, 1, total_seq_len, total_seq_len)
-        full_attention_mask = full_attention_mask * row_mask
+            # Apply language-specific masking
+            lang_mask = lang_attention_mask.view(batch_size, 1, 1, -1)  # (b, 1, 1, n_lang_tokens)
+            full_attention_mask[:, :, :, :n_lang_tokens] = full_attention_mask[:, :, :, :n_lang_tokens] * lang_mask
+
+        attention_mask_for_gpt = torch.where(
+            full_attention_mask.bool(),
+            torch.zeros_like(full_attention_mask, dtype=torch.float),
+            torch.full_like(full_attention_mask, -10000.0, dtype=torch.float)
+        )
         
         # GPT forward pass
         transformer_outputs = self.model_causal_transformer(
             inputs_embeds=stacked_inputs,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask_for_gpt,
         )
         
         # Get hidden states
         hidden_states = transformer_outputs['last_hidden_state']
         
         # Extract action query hidden states
+        action_query_start_idx = n_lang_tokens + n_prev_action_tokens
+        action_query_end_idx = action_query_start_idx + n_action_query_tokens
         action_query_hidden = hidden_states[:, action_query_start_idx:action_query_end_idx]  # (b, sequence_length*chunk_size, h)
         
         # Cross attention with patch features  

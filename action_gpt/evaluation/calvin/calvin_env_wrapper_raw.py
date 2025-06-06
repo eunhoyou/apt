@@ -41,7 +41,7 @@ class CalvinEnvWrapperRaw(gym.Wrapper):
 
         Args:
             abs_datasets_dir: absolute datset directory
-            observation_space: {'rgb_obs': ['rgb_static', 'rgb_gripper'], 'depth_obs': [], 'state_obs': ['robot_obs'], 'actions': ['rel_actions'], 'language': ['language']}
+            observation_sapce: {'rgb_obs': ['rgb_static', 'rgb_gripper'], 'depth_obs': [], 'state_obs': ['robot_obs'], 'actions': ['rel_actions'], 'language': ['language']}
         """
         self.set_egl_device(device)
         env = get_env(
@@ -57,6 +57,7 @@ class CalvinEnvWrapperRaw(gym.Wrapper):
     def set_egl_device(device):
         if "EGL_VISIBLE_DEVICES" in os.environ:
             logger.warning("Environment variable EGL_VISIBLE_DEVICES is already set. Is this intended?")
+        # modified: cuda_id = device.index if device.type == "cuda" else 0
         cuda_id = torch.cuda.current_device()
         try:
             egl_id = get_egl_device_id(cuda_id)
@@ -86,12 +87,9 @@ class CalvinEnvWrapperRaw(gym.Wrapper):
                 raise NotImplementedError
             action = np.split(action_tensor.squeeze().cpu().detach().numpy(), slice_ids)
         action[-1] = 1 if action[-1] > 0 else -1
+        o, r, d, i = self.env.step(action)
 
-        # observation, reward, done, info (standard env interface of OpenAI Gym)
-        o, r, d, i = self.env.step(action)  
-        obs = o # use raw observation
-
-        return obs, r, d, i
+        return o, r, d, i
 
     def reset(
         self,
