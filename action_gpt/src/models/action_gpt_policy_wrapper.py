@@ -107,6 +107,7 @@ class ActionGPT_PolicyWrapper:
         action_pred = action_pred.detach().cpu()
 
         excuted_action = action_pred
+        
         # Update prev action buffer
         self.prev_action_buffer = torch.cat([
             self.prev_action_buffer[:, 1:],  # (1, 9, action_dim)
