@@ -4,7 +4,7 @@ export CALVIN_ROOT=${PROJECT_ROOT}/../calvin/
 export ACTION_GPT_PATH="${PROJECT_ROOT}/action_gpt/checkpoints/action_gpt_pretrained_on_calvin"
 export EVAL_DIR="${PROJECT_ROOT}/action_gpt/evaluation/calvin/eval_results"
 
-export TEST_CHUNK_SIZE=1
+export TEST_CHUNK_SIZE=5
 
 EvalCALVIN() {
 cd ${PROJECT_ROOT}/action_gpt/evaluation/calvin
