@@ -57,7 +57,6 @@ class CalvinEnvWrapperRaw(gym.Wrapper):
     def set_egl_device(device):
         if "EGL_VISIBLE_DEVICES" in os.environ:
             logger.warning("Environment variable EGL_VISIBLE_DEVICES is already set. Is this intended?")
-        # modified: cuda_id = device.index if device.type == "cuda" else 0
         cuda_id = torch.cuda.current_device()
         try:
             egl_id = get_egl_device_id(cuda_id)
@@ -109,7 +108,6 @@ class CalvinEnvWrapperRaw(gym.Wrapper):
         else:
             obs = self.env.reset()
 
-        # return self.transform_observation(obs)
         return obs # use raw observation
 
     def get_info(self):
@@ -117,5 +115,4 @@ class CalvinEnvWrapperRaw(gym.Wrapper):
 
     def get_obs(self):
         obs = self.env.get_obs()
-        # return self.transform_observation(obs)
         return obs # use raw observation
