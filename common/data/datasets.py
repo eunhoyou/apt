@@ -82,7 +82,11 @@ class LMDBDataset_for_ActionGPT(Dataset):
         chunk_size,
         prev_action_buffer_size,
         action_dim=7,
-        video_dir=None, rgb_shape=(224, 224), rgb_preprocessor=None, max_skip_frame=None):
+        robot_obs_dim=15,
+        use_gripper_rgb=False,
+        rgb_shape=(224, 224), 
+        gripper_rgb_shape=(84, 84),
+        video_dir=None, rgb_preprocessor=None, max_skip_frame=None):
 
         super().__init__()
 
@@ -90,11 +94,22 @@ class LMDBDataset_for_ActionGPT(Dataset):
         self.chunk_size = chunk_size
         self.prev_action_buffer_size = prev_action_buffer_size
         self.action_dim = action_dim
+        self.robot_obs_dim = robot_obs_dim
+        self.use_gripper_rgb = use_gripper_rgb
 
-        self.dummy_rgb_initial = torch.zeros(1, 3, rgb_shape[0], rgb_shape[1], dtype=torch.uint8)
+        # Static RGB dummy
+        self.dummy_rgb_static = torch.zeros(1, 3, rgb_shape[0], rgb_shape[1], dtype=torch.uint8)
+        
+        # Gripper RGB dummy
+        if self.use_gripper_rgb:
+            self.dummy_rgb_gripper = torch.zeros(1, 3, gripper_rgb_shape[0], gripper_rgb_shape[1], dtype=torch.uint8)
+        else:
+            self.dummy_rgb_gripper = torch.zeros(1, 3, 1, 1, dtype=torch.uint8)  # placeholder
+            
         self.dummy_actions = torch.zeros(sequence_length, chunk_size, action_dim)
         self.dummy_mask = torch.zeros(sequence_length, chunk_size)
         self.dummy_prev_actions = torch.zeros(prev_action_buffer_size, action_dim)
+        self.dummy_robot_obs = torch.zeros(robot_obs_dim)
 
         self.lmdb_dir = lmdb_dir
         self.video_dir = video_dir
@@ -122,7 +137,7 @@ class LMDBDataset_for_ActionGPT(Dataset):
         # return os.path.join(self.video_dir, f'{self.split}_eps_{cur_episode:08d}.mp4')
         raise NotImplementedError
 
-    def extract_frames(self, idx, cur_episode, rgb_initial):
+    def extract_frames(self, idx, cur_episode, rgb_static, rgb_gripper):
         start_local_step = loads(self.txn.get(f'local_step_{idx}'.encode()))
         video_path = self.get_video_path(cur_episode)
         video = cv2.VideoCapture(video_path)
@@ -142,7 +157,9 @@ class LMDBDataset_for_ActionGPT(Dataset):
                 frame  = self.rgb_preprocessor(frame)
             return frame
 
-        rgb_initial[0] = _extract_frame(start_local_step)
+        rgb_static[0] = _extract_frame(start_local_step)
+        if self.use_gripper_rgb:
+            rgb_gripper[0] = _extract_frame(start_local_step)  # 동일한 타임스텝에서 gripper image 추출
 
         video.release()
 
@@ -158,6 +175,11 @@ class LMDBDataset_for_ActionGPT(Dataset):
     def extract_action(self, idx):
         raise NotImplementedError
 
+    def extract_robot_obs(self, idx):
+        """Robot observation 추출 함수"""
+        robot_obs = loads(self.txn.get(f'robot_obs_{idx}'.encode()))
+        return robot_obs
+
     def __getitem__(self, idx):
         if hasattr(self, 'env') == 0:
             self.open_lmdb()
@@ -166,11 +188,13 @@ class LMDBDataset_for_ActionGPT(Dataset):
         idx = idx + self.start_step
         cur_episode = loads(self.txn.get(f'cur_episode_{idx}'.encode()))
 
-        rgb_initial = self.dummy_rgb_initial.clone()
+        rgb_static = self.dummy_rgb_static.clone()
+        rgb_gripper = self.dummy_rgb_gripper.clone()
         actions = self.dummy_actions.clone()
         mask = self.dummy_mask.clone()
         prev_actions = self.dummy_prev_actions.clone()
         prev_actions_mask = torch.zeros(self.prev_action_buffer_size)
+        robot_obs = self.dummy_robot_obs.clone()
         
         # previous actions 
         for i in range(1, self.prev_action_buffer_size + 1):
@@ -182,12 +206,16 @@ class LMDBDataset_for_ActionGPT(Dataset):
         # extract lang goal
         lang = self.extract_lang_goal(idx, cur_episode)
 
-        # extract initial frame
+        # extract frames (both static and gripper)
         self.extract_frames(
             idx=idx, 
             cur_episode=cur_episode, 
-            rgb_initial=rgb_initial
+            rgb_static=rgb_static,
+            rgb_gripper=rgb_gripper
         )
+
+        # extract robot observation
+        robot_obs = self.extract_robot_obs(idx)
 
         self.extract_actions(
             idx=idx, 
@@ -198,7 +226,9 @@ class LMDBDataset_for_ActionGPT(Dataset):
 
         return {
             "lang": lang,
-            "rgb_initial": rgb_initial,
+            "rgb_static": rgb_static,
+            "rgb_gripper": rgb_gripper,
+            "robot_obs": robot_obs,
             "actions": actions,
             "mask": mask,
             "prev_actions": prev_actions,
@@ -217,8 +247,11 @@ class LMDBDataset_for_ActionGPT_CALVIN(LMDBDataset_for_ActionGPT):
         lang = loads(self.txn.get(f'inst_{cur_episode}'.encode()))
         return lang
 
-    def extract_frames(self, idx, cur_episode, rgb_initial):
-        rgb_initial[0] = decode_jpeg(loads(self.txn.get(f'rgb_static_{idx}'.encode())))
+    def extract_frames(self, idx, cur_episode, rgb_static, rgb_gripper):
+        rgb_static[0] = decode_jpeg(loads(self.txn.get(f'rgb_static_{idx}'.encode())))
+        
+        if self.use_gripper_rgb:
+            rgb_gripper[0] = decode_jpeg(loads(self.txn.get(f'rgb_gripper_{idx}'.encode())))
 
     def extract_actions(self, idx, cur_episode, actions, mask):
         for i in range(self.sequence_length):
@@ -233,3 +266,7 @@ class LMDBDataset_for_ActionGPT_CALVIN(LMDBDataset_for_ActionGPT):
         action = loads(self.txn.get(f'rel_action_{idx}'.encode()))
         action[-1] = (action[-1] + 1) / 2
         return action
+
+    def extract_robot_obs(self, idx):
+        robot_obs = loads(self.txn.get(f'robot_obs_{idx}'.encode()))
+        return robot_obs

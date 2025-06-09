@@ -34,7 +34,9 @@ def main(cfg):
         'sequence_length': action_gpt_config['sequence_length'],
         'chunk_size': action_gpt_config['chunk_size'],
         'prev_action_buffer_size': action_gpt_config['prev_action_buffer_size'],
-        'action_dim': action_gpt_config['act_dim']
+        'action_dim': action_gpt_config['act_dim'],
+        'robot_obs_dim': action_gpt_config.get('robot_obs_dim', 15),
+        'use_gripper_rgb': action_gpt_config.get('use_gripper_rgb', False)
     }
     
     train_dataset, eval_dataset = load_dataset(dataset_config_path, extra_data_config)

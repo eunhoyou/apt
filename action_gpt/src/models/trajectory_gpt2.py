@@ -334,10 +334,24 @@ class Attention(nn.Module):
         w = torch.matmul(q, k)
         if self.scale:
             w = w / (float(v.size(-1)) ** 0.5)
+        nd, ns = w.size(-2), w.size(-1)
+
+        if not self.is_cross_attention:
+            # Apply causal mask only if attention_mask is not provided or is 2D (padding mask)
+            # If attention_mask is 4D, it means custom attention pattern is provided
+            if attention_mask is None or attention_mask.dim() != 4:
+                # Apply standard causal mask
+                mask = self.bias[:, :, ns - nd: ns, :ns]
+                w = torch.where(mask.bool(), w, self.masked_bias.to(w.dtype))
 
         if attention_mask is not None:
             # Apply the attention mask
-            w = w + attention_mask
+            if attention_mask.dim() == 4:
+                # Custom 4D mask provided - use directly (bidirectional pattern)
+                w = w + attention_mask
+            else:
+                # Standard 2D mask - will be converted by GPT2Model.forward()
+                w = w + attention_mask
 
         w = nn.Softmax(dim=-1)(w)
         w = self.attn_dropout(w)

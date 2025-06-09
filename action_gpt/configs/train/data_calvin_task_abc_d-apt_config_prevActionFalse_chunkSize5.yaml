@@ -1,5 +1,5 @@
-action_gpt_config_path: "/workspace/ActionGPT/action_gpt/configs/models/action_gpt_config.yaml"
-dataset_config_path: "/workspace/ActionGPT/action_gpt/configs/data/calvin.yaml"
+action_gpt_config_path: "/workspace/APT/action_gpt/configs/models/apt_config_prevActionFalse_chunkSize5.yaml"
+dataset_config_path: "/workspace/APT/action_gpt/configs/data/calvin.yaml"
 dataloader_config:
   bs_per_gpu: 32
   workers_per_gpu: 4
@@ -18,6 +18,6 @@ training_config:
   gradient_accumulation_steps: 4
   save_epochs: 1
   save_steps: 10000
-  save_path: "/workspace/ActionGPT/action_gpt/outputs/calvin_task_abc_d"
+  save_path: "/workspace/APT/action_gpt/outputs/calvin_task_abc_d"
   resume_ckpt_path: null
-  max_epoch: 20
+  max_epoch: 10

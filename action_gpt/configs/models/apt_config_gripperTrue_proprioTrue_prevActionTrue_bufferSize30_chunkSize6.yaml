@@ -22,6 +22,11 @@ hidden_size: 768
 sequence_length: 1
 chunk_size: 6
 prev_action_buffer_size: 30
+robot_obs_dim: 15
+robot_states_dim: 7  # (tcp_pos + tcp_ori + gripper_action)
+is_prev_action_buffer: true
+use_robot_obs: true
+use_gripper_rgb: true
 img_feat_dim: 768
 patch_feat_dim: 768
 lang_feat_dim: 768

@@ -98,8 +98,13 @@ class ActionGPT_Trainer:
         self.prev_action_buffer_size = action_gpt_config.get('prev_action_buffer_size', 10)
         self.pred_binary_gripper_action = action_gpt_config.get('is_gripper_binary', True)
         self.pred_discrete_arm_action = action_gpt_config.get('pred_discrete_arm_action', False)
+        self.is_prev_action_buffer = action_gpt_config.get('is_prev_action_buffer', True)
+        self.use_robot_obs = action_gpt_config.get('use_robot_obs', False)
+        self.use_gripper_rgb = action_gpt_config.get('use_gripper_rgb', False)
         
         self.rgb_preprocessor = rgb_preprocessor.to(self.device)
+        if self.use_gripper_rgb:
+            self.gripper_rgb_preprocessor = rgb_preprocessor.to(self.device)
         self.lang_tokenizer = lang_tokenizer
         self.save_path = save_path
         self.save_epochs = save_epochs
@@ -121,7 +126,10 @@ class ActionGPT_Trainer:
                 "sequence_length": self.sequence_length,
                 "action_chunk_size": self.action_chunk_size,
                 "prev_action_buffer_size": self.prev_action_buffer_size,
-                "pred_binary_gripper_action": self.pred_binary_gripper_action
+                "pred_binary_gripper_action": self.pred_binary_gripper_action,
+                "is_prev_action_buffer": self.is_prev_action_buffer,
+                "use_robot_obs": self.use_robot_obs,
+                "use_gripper_rgb": self.use_gripper_rgb
             }
             
             run = wandb.init(
@@ -219,20 +227,34 @@ class ActionGPT_Trainer:
             wandb.finish()
 
     def calculate_loss(self, batch, train):
-        rgb_initial = self.rgb_preprocessor(batch['rgb_initial'], train=train)
+        rgb_static = self.rgb_preprocessor(batch['rgb_static'], train=train)
+
+        if self.use_gripper_rgb:
+            rgb_gripper = self.gripper_rgb_preprocessor(batch['rgb_gripper'], train=train)
+        else:
+            rgb_gripper = None
+            
+        if self.is_prev_action_buffer:
+            prev_actions = batch['prev_actions']
+        else:
+            prev_actions = None
+            
+        if self.use_robot_obs:
+            robot_obs = batch.get('robot_obs', None)
+        else:
+            robot_obs = None
         
-        attention_mask = batch['mask'][..., 0]
         pred = self.action_gpt(
-            rgb=rgb_initial, # (b, 1, c, h, w)
+            rgb_static=rgb_static,        # static RGB
             language=batch['lang_input_ids'],
-            attention_mask=attention_mask, # (b, t)
-            prev_actions=batch['prev_actions'],
-            prev_actions_mask=batch['prev_actions_mask'],
+            rgb_gripper=rgb_gripper,      # gripper RGB (use_gripper_rgb가 False면 None)
+            robot_obs=robot_obs,          # robot observation
+            prev_actions=prev_actions,    # prev action buffer
             lang_attention_mask=batch['lang_attention_mask'],
         )
     
         loss = {}
-        device = batch['rgb_initial'].device
+        device = batch['rgb_static'].device
         
         if self.pred_discrete_arm_action:
             action_arm_loss_func = cross_entropy
@@ -241,15 +263,15 @@ class ActionGPT_Trainer:
             action_arm_loss_func = F.smooth_l1_loss
             gt_action_arm = batch['actions'][..., :self.act_dim-1]
         
-        loss['action_arm'] = masked_loss(pred['arm_action_preds'], gt_action_arm, batch['mask'], 0, action_arm_loss_func) if pred['arm_action_preds'] is not None else torch.tensor(0.0).to(device)
+        loss['action_arm'] = masked_loss(pred['arm_action_preds'], gt_action_arm, batch['mask'], action_arm_loss_func) if pred['arm_action_preds'] is not None else torch.tensor(0.0).to(device)
         
         if self.pred_binary_gripper_action:
             gripper_action_loss_func = F.binary_cross_entropy_with_logits
         else:
             gripper_action_loss_func = F.smooth_l1_loss
             
-        loss['action_gripper'] = masked_loss(pred['gripper_action_preds'], batch['actions'][..., -1:].float(), batch['mask'], 0, gripper_action_loss_func) if pred['gripper_action_preds'] is not None else torch.tensor(0.0).to(device)
-        total_loss = loss['action_arm'] + 0.1 * loss['action_gripper']
+        loss['action_gripper'] = masked_loss(pred['gripper_action_preds'], batch['actions'][..., -1:].float(), batch['mask'], gripper_action_loss_func) if pred['gripper_action_preds'] is not None else torch.tensor(0.0).to(device)
+        total_loss = loss['action_arm'] + 0.01 * loss['action_gripper']
         loss['total_loss'] = total_loss
         
         return loss

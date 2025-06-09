@@ -1,8 +1,3 @@
 data_type: "calvin"
 lmdb_dir: "/data/lmdb_datasets/task_ABC_D/"
-<<<<<<< HEAD
 rgb_shape: [200, 200]
-skip_frame: 5
-=======
-rgb_shape: [200, 200]
->>>>>>> b2d00811c2a7ff2a782005090b4163615dcf9c27

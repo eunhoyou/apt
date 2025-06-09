@@ -1,32 +1,10 @@
-# MIT License
-
-# Copyright (c) 2021 Oier Mees
-# Copyright (c) 2024 Bytedance Ltd. and/or its affiliates
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-
-"""Code to evaluate Calvin."""
+"""Code to evaluate Calvin with Moto-GPT + ActionGPT hybrid approach."""
 import pyrootutils
 import os
 import sys
 pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dotenv=True)
-from common.models.model_utils import load_action_gpt_policy
+
+from common.models.model_utils import load_action_gpt_policy, load_moto_gpt_policy
 
 from omegaconf import OmegaConf
 import hydra
@@ -42,7 +20,6 @@ from accelerate import Accelerator
 from datetime import timedelta
 from accelerate.utils import InitProcessGroupKwargs
 
-
 from calvin_agent.evaluation.multistep_sequences import get_sequences
 from calvin_agent.evaluation.utils import (
     count_success,
@@ -56,7 +33,6 @@ import torch
 from tqdm.auto import tqdm
 from transformers import set_seed
 
-
 logger = logging.getLogger(__name__)
 
 os.environ["FFMPEG_BINARY"] = "auto-detect"
@@ -68,8 +44,69 @@ def make_env(dataset_path, observation_space, device, show_gui=False):
     env = CalvinEnvWrapperRaw(val_folder, observation_space, device, show_gui)
     return env
 
+class HybridPolicyWrapper:
+    """Wrapper that combines Moto-GPT and ActionGPT policies."""
+    
+    def __init__(self, moto_gpt_policy, action_gpt_policy, switch_step=20):
+        self.moto_gpt_policy = moto_gpt_policy
+        self.action_gpt_policy = action_gpt_policy
+        self.switch_step = switch_step
+        self.current_step = 0
+        
+        # Store original test_chunk_sizes from config
+        self.moto_chunk_size = 5  # Moto-GPT actual chunk_size from config
+        self.action_chunk_size = 5  # ActionGPT default
+        
+    def reset(self):
+        """Reset both policies and step counter."""
+        self.current_step = 0
+        self.moto_gpt_policy.reset()
+        self.action_gpt_policy.reset()
+        
+    def reset_buffer(self):
+        """Reset buffers for both policies."""
+        if hasattr(self.moto_gpt_policy, 'reset_buffer'):
+            self.moto_gpt_policy.reset_buffer()
+        self.action_gpt_policy.reset_buffer()
+        
+    def step(self, obs, goal):
+        """Step function that switches between policies based on current step."""
+        if self.current_step < self.switch_step:
+            # Use Moto-GPT for first 20 steps
+            
+            action = self.moto_gpt_policy.step(obs, goal)
+            
+            # Update ActionGPT's prev_action_buffer with Moto-GPT's action
+            if hasattr(self.action_gpt_policy, 'prev_action_buffer'):
+                # Convert action to appropriate format and update buffer
+                if isinstance(action, np.ndarray):
+                    action_tensor = torch.from_numpy(action).float()
+                else:
+                    action_tensor = action.float()
+                    
+                if action_tensor.dim() == 1:
+                    action_tensor = action_tensor.unsqueeze(0)  # Add batch dim if needed
+                
+                # Get the number of actions to add (both have chunk_size=5, so should be compatible)
+                num_actions = min(action_tensor.shape[0], self.action_gpt_policy.prev_action_buffer.shape[1])
+                
+                # Update ActionGPT's buffer by shifting and adding new actions
+                self.action_gpt_policy.prev_action_buffer = torch.cat([
+                    self.action_gpt_policy.prev_action_buffer[:, num_actions:],
+                    action_tensor[:num_actions].unsqueeze(0)
+                ], dim=1)
+        else:
+            # Use ActionGPT after switch_step
+            start_time = time.time()
 
-def evaluate_policy(model, env, eval_sr_path, eval_result_path, ep_len, num_sequences, num_procs, procs_id, eval_dir=None, debug=False):
+            action = self.action_gpt_policy.step(obs, goal)
+            inference_time = time.time() - start_time
+            print(f"inference time: {inference_time:.4f} seconds")
+            
+        self.current_step += 1
+        return action
+
+def evaluate_policy(moto_gpt_model, action_gpt_model, env, eval_sr_path, eval_result_path, ep_len, num_sequences, num_procs, procs_id, eval_dir=None, debug=False, switch_step=20):
     conf_dir = Path(f"{CALVIN_ROOT}/calvin_models") / "conf"
     task_cfg = OmegaConf.load(conf_dir / "callbacks/rollout/tasks/new_playtable_tasks.yaml")
     task_oracle = hydra.utils.instantiate(task_cfg)
@@ -79,13 +116,16 @@ def evaluate_policy(model, env, eval_sr_path, eval_result_path, ep_len, num_sequ
     num_seq_per_procs = num_sequences // num_procs
     eval_sequences = eval_sequences[num_seq_per_procs*procs_id:num_seq_per_procs*(procs_id+1)]
 
+    # Create hybrid policy wrapper
+    hybrid_model = HybridPolicyWrapper(moto_gpt_model, action_gpt_model, switch_step)
+
     results = []
     if not debug:
         eval_sequences = tqdm(eval_sequences, position=0, leave=True)
 
     sequence_i = 0
     for initial_state, eval_sequence in eval_sequences:
-        result = evaluate_sequence(env, model, task_oracle, initial_state, eval_sequence, val_annotations, debug, eval_dir, sequence_i, ep_len)
+        result = evaluate_sequence(env, hybrid_model, task_oracle, initial_state, eval_sequence, val_annotations, debug, eval_dir, sequence_i, ep_len)
         results.append(result)
         if not debug:
             success_list = count_success(results)
@@ -103,7 +143,6 @@ def evaluate_policy(model, env, eval_sr_path, eval_result_path, ep_len, num_sequ
             sequence_i += 1
     print_and_save(results, eval_sequences, eval_result_path, None)
     return results
-
 
 def evaluate_sequence(env, model, task_checker, initial_state, eval_sequence, val_annotations, debug, eval_dir, sequence_i, ep_len):
     robot_obs, scene_obs = get_env_state_for_initial_condition(initial_state)
@@ -124,19 +163,18 @@ def evaluate_sequence(env, model, task_checker, initial_state, eval_sequence, va
             return success_counter
     return success_counter
 
-
 def rollout(env, model, task_oracle, subtask, val_annotations, debug, eval_dir, subtask_i, sequence_i, ep_len):
     if debug:
         print(f"{subtask} ", end="")
         time.sleep(0.5)
     obs = env.get_obs()
     lang_annotation = val_annotations[subtask][0]
-    # print(lang_annotation)
-    model.reset()
+    model.reset()  # Reset the hybrid model for each subtask
     start_info = env.get_info()
     if debug:
         img_list = []
     unfinished = 0
+    
     for step in range(ep_len):
         if unfinished == 0:
             action = model.step(obs, lang_annotation)
@@ -166,10 +204,18 @@ def main(args):
     acc = Accelerator(kwargs_handlers=[kwargs])
     device = acc.device
     
+    # Load ActionGPT
     args.is_gripper_binary = True
-    eva = load_action_gpt_policy(args)
-    eva.policy = acc.prepare(eva.policy, device_placement=[True])
-    eva.policy.eval()
+    action_gpt_eva = load_action_gpt_policy(args)
+    action_gpt_eva.policy = acc.prepare(action_gpt_eva.policy, device_placement=[True])
+    action_gpt_eva.policy.eval()
+    
+    # Load Moto-GPT with its own test_chunk_size
+    moto_args = argparse.Namespace(**vars(args))
+    moto_args.test_chunk_size = 5  # Moto-GPT original default test_chunk_size
+    moto_gpt_eva = load_moto_gpt_policy(moto_args)
+    moto_gpt_eva.policy = acc.prepare(moto_gpt_eva.policy, device_placement=[True])
+    moto_gpt_eva.policy.eval()
 
     # Prepare CALVIN Environment
     observation_space = {
@@ -187,9 +233,10 @@ def main(args):
     env = make_env('fake_dataset', observation_space, device, show_gui=args.show_gui)
     acc.print(f"initialize CALVIN environment")
 
-    # Evaluation
+    # Evaluation with hybrid approach
     avg_reward = torch.tensor(evaluate_policy(
-        eva, 
+        moto_gpt_eva, 
+        action_gpt_eva,
         env,
         os.path.join(args.eval_dir,'success_rate.txt'),
         os.path.join(args.eval_dir,'result.txt'),
@@ -199,18 +246,29 @@ def main(args):
         acc.process_index,
         eval_dir,
         debug=args.record_evaluation_video,
+        switch_step=args.switch_step
     )).float().mean().to(device)
     acc.wait_for_everyone()
     avg_reward = acc.gather_for_metrics(avg_reward).mean()
     if acc.is_main_process:
         print('average success rate ', avg_reward)
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--action_gpt_path', type=str, required=True)
-
+    parser.add_argument('--moto_gpt_path', type=str, required=True)
     parser.add_argument('--test_chunk_size', type=int, default=5)
+    parser.add_argument('--switch_step', type=int, default=20)
+    
+    # Moto-GPT specific arguments with their original default values
+    parser.add_argument('--mask_latent_motion_probability', type=float, default=1.0)
+    parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--sample', type=str, default='true')  # Will be converted to bool
+    parser.add_argument('--top_k', type=int, default=0)
+    parser.add_argument('--top_p', type=float, default=1.0)
+    parser.add_argument('--beam_size', type=int, default=5)
+    parser.add_argument('--parallel', type=str, default='false')  # Will be converted to bool
+    parser.add_argument('--use_temporal_ensemble', type=str, default='false')  # Will be converted to bool
 
     parser.add_argument('--num_sequences', type=int, default=1000)
     parser.add_argument('--ep_len', type=int, default=360)
@@ -220,7 +278,11 @@ if __name__ == '__main__':
     parser.add_argument('--record_evaluation_video', action='store_true')
 
     args = parser.parse_args()
-    set_seed(42)
-    main(args)
-
     
+    # Convert string boolean arguments to actual booleans
+    args.sample = args.sample.lower() == 'true'
+    args.parallel = args.parallel.lower() == 'true'
+    args.use_temporal_ensemble = args.use_temporal_ensemble.lower() == 'true'
+    
+    set_seed(12345)  # Use Moto-GPT's original seed
+    main(args)

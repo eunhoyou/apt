@@ -34,6 +34,10 @@ class ActionGPT_PolicyWrapper:
         self.chunk_size = variant['chunk_size']
         self.prev_action_buffer_size = variant['prev_action_buffer_size']
         
+        self.is_prev_action_buffer = variant.get('is_prev_action_buffer', True)
+        self.use_robot_obs = variant.get('use_robot_obs', False)
+        self.use_gripper_rgb = variant.get('use_gripper_rgb', False)
+        
         self.valid_prev_actions_count = 0
         self.rollout_step_counter = 0
         
@@ -53,30 +57,77 @@ class ActionGPT_PolicyWrapper:
 
     def reset_buffer(self):
         """Reset function."""
-        self.prev_action_buffer = torch.zeros(1, self.prev_action_buffer_size, self.act_dim)  # (1, buffer_size, act_dim)
+        if self.is_prev_action_buffer:
+            self.prev_action_buffer = torch.zeros(1, self.prev_action_buffer_size, self.act_dim)
+
+    def add_action_to_buffer(self, action):
+        """외부에서 action을 buffer에 추가"""
+        if not self.is_prev_action_buffer:
+            return
+            
+        if not hasattr(self, 'prev_action_buffer'):
+            self.reset_buffer()
+        
+        if not isinstance(action, torch.Tensor):
+            action = torch.tensor(action)
+        
+        if action.dim() == 1:
+            action = action.unsqueeze(0)
+        if action.dim() == 2 and action.shape[0] > 1:
+            action = action[:1]
+            
+        self.prev_action_buffer = torch.cat([
+            self.prev_action_buffer[:, 1:],
+            action.unsqueeze(0)
+        ], dim=1)
 
     def step(self, obs, goal):
         """Step function."""
+        if self.is_prev_action_buffer and not hasattr(self, 'prev_action_buffer'):
+            self.reset_buffer()
+            
         # Language processing
         lang_inputs = self.lang_tokenizer(goal, return_tensors='pt', padding=True)
         tokenized_text = lang_inputs.input_ids
         lang_attention_mask = lang_inputs.attention_mask
 
-        # RGB processing
-        rgb = self.rgb_process(obs['rgb_obs']['rgb_static'])
-        rgb = rgb.unsqueeze(0).unsqueeze(0)  # (1, 1, c, h, w)
+        # Static RGB processing
+        rgb_static = self.rgb_process(obs['rgb_obs']['rgb_static'])
+        rgb_static = rgb_static.unsqueeze(0).unsqueeze(0)  # (1, 1, c, h, w)
+        
+        # Gripper RGB processing
+        if self.use_gripper_rgb and 'rgb_gripper' in obs['rgb_obs']:
+            rgb_gripper = self.rgb_process(obs['rgb_obs']['rgb_gripper'])
+            rgb_gripper = rgb_gripper.unsqueeze(0).unsqueeze(0)  # (1, 1, c, h, w)
+        else:
+            rgb_gripper = None
         
         # Forward pass
         tokenized_text = tokenized_text.to(self.device)
         lang_attention_mask = lang_attention_mask.to(self.device) if lang_attention_mask is not None else None
-        rgb = rgb.to(self.device)
-        prev_actions = self.prev_action_buffer.to(self.device)
+        rgb_static = rgb_static.to(self.device)
+        if rgb_gripper is not None:
+            rgb_gripper = rgb_gripper.to(self.device)
+        
+        # prev_actions 전달
+        if self.is_prev_action_buffer:
+            prev_actions = self.prev_action_buffer.to(self.device)
+        else:
+            prev_actions = None
+        
+        # robot_obs 전달
+        if self.use_robot_obs and 'robot_obs' in obs:
+            robot_obs = torch.tensor(obs['robot_obs']).float().unsqueeze(0).to(self.device)  # (1, robot_obs_dim)
+        else:
+            robot_obs = None
         
         with torch.no_grad():
             prediction = self.policy(
-                rgb=rgb, 
+                rgb_static=rgb_static,        # static RGB
                 language=tokenized_text,
-                prev_actions=prev_actions,
+                rgb_gripper=rgb_gripper,      # gripper RGB
+                robot_obs=robot_obs,          # robot observation
+                prev_actions=prev_actions,    # prev actions
                 lang_attention_mask=lang_attention_mask,
         )
 
@@ -98,12 +149,11 @@ class ActionGPT_PolicyWrapper:
         action_pred = torch.cat((arm_action_pred, gripper_action_pred), dim=-1)  # (test_chunk_size, act_dim)
         action_pred = action_pred.detach().cpu()
 
-        # Update prev action buffer
-        self.prev_action_buffer = torch.cat([
-            self.prev_action_buffer[:, self.test_chunk_size:],
-            action_pred.unsqueeze(0)
-        ], dim=1)
+        if self.is_prev_action_buffer:
+            self.prev_action_buffer = torch.cat([
+                self.prev_action_buffer[:, self.test_chunk_size:],
+                action_pred.unsqueeze(0)
+            ], dim=1)
           
-
         self.rollout_step_counter += 1
         return action_pred
